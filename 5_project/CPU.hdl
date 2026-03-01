@@ -1,0 +1,121 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/5/CPU.hdl
+/**
+ * The Hack Central Processing unit (CPU).
+ * Parses the binary code in the instruction input and executes it according to the
+ * Hack machine language specification. In the case of a C-instruction, computes the
+ * function specified by the instruction. If the instruction specifies to read a memory
+ * value, the inM input is expected to contain this value. If the instruction specifies
+ * to write a value to the memory, sets the outM output to this value, sets the addressM
+ * output to the target address, and asserts the writeM output (when writeM = 0, any
+ * value may appear in outM).
+ * If the reset input is 0, computes the address of the next instruction and sets the
+ * pc output to that value. If the reset input is 1, sets pc to 0.
+ * Note: The outM and writeM outputs are combinational: they are affected by the
+ * instruction's execution during the current cycle. The addressM and pc outputs are
+ * clocked: although they are affected by the instruction's execution, they commit to
+ * their new values only in the next cycle.
+ */
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Restart program (1) or continue (0)
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M?
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // Address of next instruction
+
+    PARTS:
+
+    // Instruction Type Decode
+    //  instruction[15] = 1 -> C-instruction (compute)
+    //  instruction[15] = 0 -> A-instruction (load constant into A)
+    Not(in= instruction[15], out= isAInstruction);
+
+    // A Register
+    //  A-instruction -> the raw 16-bit instruction value (a constant/address)
+    //  C-instruction -> the ALU output (when d1 = instruction[5] is set)
+    Mux16(a= instruction, b= aluOut, sel= instruction[15], out= aRegIn);
+
+    // Load A if: it's an A-instruction (always load)
+    //  OR it's a C-instruction with destination bit d1 set (instruction[5]).
+    Or(a= isAInstruction, b= instruction[5], out= loadA);
+    ARegister(in= aRegIn, load= loadA, out= aRegOut, out[0..14]= addressM);
+
+    // D Register
+    //  Load D only on a C-instruction that has destination bit d2 set (instruction[4]).
+    And(a= instruction[15], b= instruction[4], out= loadD);
+    DRegister(in= aluOut, load= loadD, out= dRegOut);
+
+    // ALU Y-input Selection
+    // The 'a' bit (instruction[12]) controls the ALU's Y operand source:
+    //  a = 0 -> use value of A register
+    //  a = 1 -> use value from Memory (inM)
+    Mux16(a= aRegOut, b= inM, sel= instruction[12], out= aluY);
+
+    // ALU Control Bits
+    //  c1..c6 bits are active only during a C-instruction (ANDed with instruction[15]).
+    //  For A-instructions, zy and ny are forced to 1 (via OR with isAInstruction)
+    //  so that the ALU's Y path is neutralised and the result is irrelevant.
+    //
+    //   zx (c1, bit 11): zero the X input
+    //   nx (c2, bit 10): negate the X input
+    //   zy (c3, bit  9): zero the Y input
+    //   ny (c4, bit  8): negate the Y input
+    //   f  (c5, bit  7): function — 0 = bitwise AND, 1 = integer ADD
+    //   no (c6, bit  6): negate the output
+    And(a= instruction[11], b= instruction[15], out= zx);
+    And(a= instruction[10], b= instruction[15], out= nx);
+    Or (a= instruction[9],  b= isAInstruction,  out= zy);
+    Or (a= instruction[8],  b= isAInstruction,  out= ny);
+    And(a= instruction[7],  b= instruction[15], out= f);
+    And(a= instruction[6],  b= instruction[15], out= no);
+
+    // ALU
+    //  X is always the D register value; Y is A or M (selected above).
+    //  Produces: computed result (aluOut / outM), zero flag (isZero), negative flag (isNeg).
+    ALU(
+        x=  dRegOut, y=   aluY,
+        zx= zx,      nx=  nx,
+        zy= zy,      ny=  ny,
+        f=  f,       no=  no,
+        out= aluOut, out= outM,
+        zr=  isZero,  ng= isNeg
+    );
+
+    // Memory Write
+    //  Assert writeM only when executing a C-instruction with destination bit d3
+    //  set (instruction[3]), meaning the result should be written to RAM[A].
+    And(a= instruction[15], b= instruction[3], out= writeM);
+
+    // Jump Logic
+    //  Derive the "positive" flag: output is positive iff it is neither zero nor negative.
+    Or (a= isZero, b= isNeg,  out= notPos);
+    Not(in= notPos,            out= isPos);
+
+    // Map each jump bit to the matching ALU status flag:
+    //  j1 (bit 2) + isNeg  -> JLT: jump if out < 0
+    //  j2 (bit 1) + isZero -> JEQ: jump if out = 0
+    //  j3 (bit 0) + isPos  -> JGT: jump if out > 0
+    And(a= instruction[2], b= isNeg,  out= jlt);
+    And(a= instruction[1], b= isZero, out= jeq);
+    And(a= instruction[0], b= isPos,  out= jgt);
+
+    // A jump is requested if any single jump condition is satisfied.
+    Or(a= jlt, b= jeq,     out= jltOrJeq);
+    Or(a= jltOrJeq, b= jgt, out= anyJump);
+
+    // Jumps are only valid during C-instructions – suppress them for A-instructions.
+    And(a= anyJump, b= instruction[15], out= loadPC);
+
+    // Program Counter
+    //  Priority (handled internally by PC chip):
+    //  reset  = 1 -> PC ← 0       (restart program)
+    //  loadPC = 1 -> PC ← A       (jump to address in A)
+    //  else       -> PC ← PC + 1  (advance to next instruction)
+    PC(in= aRegOut, load= loadPC, inc= true, reset= reset, out[0..14]= pc);
+}
